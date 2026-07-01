@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json.schemastore.org/nest-cli",
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "apps/finpay/src",
+  "compilerOptions": {
+    "deleteOutDir": true,
+    "webpack": true,
+    "tsConfigPath": "apps/finpay/tsconfig.app.json"
+  },
+  "monorepo": true,
+  "root": "apps/finpay",
+  "projects": {
+    "api-gateway": {
+      "type": "application",
+      "root": "apps/api-gateway",
+      "entryFile": "main",
+      "sourceRoot": "apps/api-gateway/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/api-gateway/tsconfig.app.json"
+      }
+    },
+    "core-ledger": {
+      "type": "application",
+      "root": "apps/core-ledger",
+      "entryFile": "main",
+      "sourceRoot": "apps/core-ledger/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/core-ledger/tsconfig.app.json"
+      }
+    },
+    "finpay": {
+      "type": "application",
+      "root": "apps/finpay",
+      "entryFile": "main",
+      "sourceRoot": "apps/finpay/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/finpay/tsconfig.app.json"
+      }
+    }
+  }
+}
