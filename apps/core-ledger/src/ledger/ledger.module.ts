@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 import { LedgerService } from './ledger.service';
+import { PrismaModule } from '../prisma/prisma.module';
 
 @Module({
-  providers: [LedgerService]
+  imports: [PrismaModule],
+  providers: [LedgerService],
 })
 export class LedgerModule {}
