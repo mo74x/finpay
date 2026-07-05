@@ -2,127 +2,208 @@
 
 A **NestJS microservices monorepo** implementing a production-grade backend for a fintech payment platform. Built to demonstrate enterprise-level backend engineering patterns including double-entry accounting, distributed tracing, async job queues, and full-text search.
 
-> **GitHub**: [github.com/mo74x/finpay](https://github.com/mo74x/finpay)
-
 ---
 
-## Architecture
+## 🏗️ System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Client (HTTP)                         │
-└────────────────────────────┬────────────────────────────────┘
-                             │ REST
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    API Gateway  :3000                         │
-│                                                              │
-│  • JWT Authentication (register / login)                     │
-│  • Idempotency (Redis-backed, 24h TTL)                       │
-│  • Distributed Tracing (x-correlation-id)                    │
-│  • Input Validation (class-validator DTOs)                   │
-│  • Elasticsearch Search Module                               │
-│  • Structured Logging (pino)                                 │
-│  • Swagger Docs  →  /api/docs                                │
-└───────────────┬──────────────────────────────────┬──────────┘
-                │ TCP (NestJS Microservices)         │ HTTP
-                ▼                                   ▼
-┌───────────────────────────┐         ┌─────────────────────┐
-│   Core Ledger  :8877      │         │   Elasticsearch     │
-│                           │         │   :9200             │
-│  • Double-entry ledger    │         └─────────────────────┘
-│  • ACID transactions      │
-│  • Row-level locking      │
-│  • Ledger imbalance check │
-│  • Wallet ownership verify│
-└───────────┬───────────────┘
-            │ PostgreSQL
-            ▼
-┌────────────────────────────┐
-│   PostgreSQL  :5432        │
-│   (Users, Wallets,         │
-│    LedgerEntries)          │
-└────────────────────────────┘
-
-            │ Bull Queue (Redis)
-            ▼
-┌───────────────────────────────────────┐
-│   Worker Notifications                │
-│                                       │
-│  • PDF Invoice generation (simulated) │
-│  • Email dispatch (simulated)         │
-│  • Auto-retry: 3 attempts, 5s backoff │
-└───────────────────────────────────────┘
-            │
-            ▼
-┌────────────────────┐
-│   Redis  :6379     │
-│  (Job Queue +      │
-│   Idempotency)     │
-└────────────────────┘
+```mermaid
+graph TD
+    Client[Client Browser / Mobile App] -->|HTTP Request with x-idempotency-key & JWT| Gateway[API Gateway :3000]
+    
+    subgraph Gateway [API Gateway Service]
+        Auth[Passport JWT Strategy]
+        Trace[Trace Interceptor]
+        Idemp[Idempotency Interceptor]
+        SearchSvc[Search Service]
+    end
+    
+    Gateway -->|1. Authenticate| Auth
+    Gateway -->|2. Trace ID Generation| Trace
+    Gateway -->|3. Idempotency Check| RedisCache[(Redis Idempotency)]
+    
+    subgraph Microservices [TCP Microservices]
+        Ledger[Core Ledger Service :8877]
+        Worker[Worker Notifications Service]
+    end
+    
+    Gateway -->|4. TCP Request| Ledger
+    Ledger -->|5. ACID Transaction with FOR UPDATE locks| DB[(PostgreSQL Database)]
+    Ledger -->|6. Async Enqueue| BullQueue[(Redis Bull Queue)]
+    
+    BullQueue -->|7. Dequeue & Process| Worker
+    Worker -->|8. Generate PDF & Email| MailAPI[External Notification APIs]
+    
+    Gateway -->|9. Async Indexing| ES[(Elasticsearch Cluster :9200)]
 ```
 
 ---
 
-## Key Engineering Decisions
+## 🔄 End-to-End Request Flow & Lifecycles
 
-| Concern | Solution | Why |
-|---|---|---|
-| Financial correctness | ACID transactions + `FOR UPDATE` row locking | Prevents race conditions on concurrent debits |
-| Double-entry accounting | Paired debit/credit `LedgerEntry` records | Immutable audit trail, imbalance detection |
-| Duplicate requests | Redis-backed idempotency (24h TTL) | Safe for network retries; works across restarts |
-| Performance | Async invoice queue (Bull/Redis) | Transfer response in ~40ms; heavy work in background |
-| Observability | UUID correlation IDs across TCP boundaries | Full end-to-end request tracing |
-| Security | bcrypt (12 rounds) + JWT (15min expiry) | Industry-standard auth with timing-attack resistance |
-| Search | Elasticsearch full-text + fuzzy matching | Scalable transaction history queries |
+This sequence diagram details the exact path of a transfer request. It highlights how the API Gateway responds in **~40ms** by delegating long-running notifications and document indexing to async worker processes.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant Gateway as API Gateway
+    participant Redis as Redis (Idempotency & Queue)
+    participant Ledger as Core Ledger Microservice
+    participant DB as PostgreSQL
+    participant ES as Elasticsearch
+    participant Worker as Notification Worker
+
+    Client->>Gateway: POST /v1/payments/transfer (x-idempotency-key, JWT)
+    activate Gateway
+    Gateway->>Gateway: Authenticate & Validate Input DTOs
+    Gateway->>Gateway: Generate/Read Correlation ID
+    Gateway->>Redis: Check Idempotency Key
+    alt Idempotency Hit
+        Redis-->>Gateway: Return Cached Response
+        Gateway-->>Client: Respond instantly
+    else Idempotency Miss
+        Gateway->>Ledger: verify_wallet_ownership (userId, walletId)
+        Ledger->>DB: Query Wallet
+        DB-->>Ledger: Wallet Data
+        Ledger-->>Gateway: Ownership Status
+        
+        alt Not Owner
+            Gateway-->>Client: ForbiddenException (403)
+        else Owner
+            Gateway->>Ledger: execute_transfer (from, to, amount, correlationId)
+            activate Ledger
+            Ledger->>DB: Start ACID Transaction (SELECT ... FOR UPDATE)
+            DB->>DB: Lock Sender & Receiver Rows
+            Ledger->>DB: Create Debit & Credit LedgerEntry records
+            Ledger->>DB: Update Sender & Receiver Balances
+            Ledger->>DB: Commit Transaction
+            
+            Ledger->>Redis: Enqueue 'generate_invoice_and_notify' job
+            Ledger-->>Gateway: Return Success Result
+            deactivate Ledger
+            
+            Gateway-->>Client: Respond Success (~40ms)
+            deactivate Gateway
+            
+            Note over Gateway, ES: Fire-and-Forget Operations
+            Gateway-)ES: Index Transaction Document
+            
+            Note over Redis, Worker: Async Queue Processing
+            Redis-)Worker: Dequeue Job
+            activate Worker
+            Worker->>Worker: Generate PDF Invoice (~1.5s)
+            Worker->>Worker: Dispatch Email via API (~1.0s)
+            deactivate Worker
+        end
+    end
+```
 
 ---
 
-## Microservices
+## 🛢️ Database Design & Models
 
-| Service | Port | Responsibility |
-|---|---|---|
-| `api-gateway` | 3000 | HTTP entry point, auth, validation, search |
-| `core-ledger` | 8877 (TCP) | Ledger writes, wallet management |
-| `worker-notifications` | — | Async invoice + email queue consumer |
+FinPay enforces **double-entry ledger accounting** at the database layer. No wallet balance is modified without a matching pair of credit and debit ledger entries that sum to zero.
+
+```mermaid
+erDiagram
+    User ||--o{ Wallet : "owns"
+    Wallet ||--o{ LedgerEntry : "records"
+
+    User {
+        string id PK "UUIDv4"
+        string email UK "Unique address"
+        string password "Hashed with bcrypt"
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    Wallet {
+        string id PK "UUIDv4"
+        string userId FK "Belongs to User"
+        string currency "USD, EUR, etc."
+        int balance "Stored in cents"
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    LedgerEntry {
+        string id PK "UUIDv4"
+        string walletId FK "Belongs to Wallet"
+        int amount "Negative for Debit, Positive for Credit"
+        string transactionRef "Grouped identifier"
+        TransactionType type "TRANSFER, DEPOSIT, etc."
+        TransactionStatus status "COMPLETED, PENDING, FAILED"
+        datetime createdAt
+    }
+```
 
 ---
 
-## Quick Start (Docker)
+## 🛠️ Key Engineering Decisions
+
+| Category | Solution | Rationale & Trade-offs |
+|---|---|---|
+| **Financial Integrity** | Double-Entry & ACID Transactions | Wallet balances are aggregates of immutable ledger entries. Every transfer creates a Debit (`-X`) entry and a Credit (`+X`) entry within an ACID block. |
+| **Concurrency Control** | Optimistic Row-level Locking (`FOR UPDATE`) | Prevents race conditions (e.g. double-spending) by locking specific user wallet rows during transactions, preventing other read/write operations until commit/rollback. |
+| **Fault Tolerance** | Redis-Backed Idempotency | Prevents accidental duplicate payments. If a network call fails, the client retries with the same `x-idempotency-key` and receives the cached response instantly. |
+| **Performance Scaling** | Decoupled Async Job Queues | PDF invoice generation and email dispatch are pushed to a Redis queue. The gateway responds to users in ~40ms while workers process CPU/IO heavy tasks. |
+| **Observability** | Correlation ID Interceptor | A unique UUID is stamped on the request header and propagated across all services (via HTTP and TCP microservice payloads) for unified log analysis. |
+| **Scalable Search** | Elasticsearch Integration | Full-text query engine with fuzzy search matching, separate from the primary transaction database, preventing slow analytical queries from locking transactional data. |
+
+---
+
+## 📁 Monorepo Structure
+
+```
+finpay/
+├── apps/
+│   ├── api-gateway/          # REST Gateway, JWT Authentication, Search Controller, Idempotency Store
+│   ├── core-ledger/          # TCP Microservice, Database Transactions, Ledger Service, Prisma Client
+│   ├── worker-notifications/ # Bull MQ consumer, PDF generator, email service dispatcher
+│   └── finpay/               # Default project entry / stub
+├── prisma/
+│   └── schema.prisma         # Database schema declaration
+└── docker-compose.yml        # Orchestration script for services and databases
+```
+
+---
+
+## ⚡ Quick Start (Docker Orchestration)
 
 **Prerequisites**: Docker and Docker Compose installed.
 
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/mo74x/finpay.git
 cd finpay
 
-# Start all services (PostgreSQL, Redis, Elasticsearch + all 3 NestJS apps)
+# 2. Build and spin up all apps and infrastructure containers
 docker compose up --build
 
-# Run Prisma migrations (first time only — in a separate terminal)
+# 3. Apply migrations to the PostgreSQL instance (run in a separate terminal)
 docker compose exec core-ledger npx prisma migrate deploy
 ```
 
-The API will be available at **http://localhost:3000**  
-Swagger docs at **http://localhost:3000/api/docs**
+- **REST API Endpoint**: `http://localhost:3000`
+- **Swagger Documentation**: `http://localhost:3000/api/docs`
 
 ---
 
-## Quick Start (Local Development)
+## ⚙️ Local Development Setup
 
-**Prerequisites**: Node.js 22+, PostgreSQL, Redis, Elasticsearch running locally.
+**Prerequisites**: Node.js 22+, PostgreSQL, Redis, and Elasticsearch running locally.
 
 ```bash
+# 1. Install dependencies
 npm install
 
-# Copy and configure environment variables
-cp .env.example .env   # edit DATABASE_URL, JWT_SECRET, etc.
+# 2. Configure environment variables
+cp .env.example .env
 
-# Run Prisma migrations
+# 3. Run migrations and generate Prisma client
 npx prisma migrate dev
 
-# Start all services in parallel (separate terminals)
+# 4. Spin up the microservices (in separate terminals or a workspace runner)
 npm run start:dev api-gateway
 npm run start:dev core-ledger
 npm run start:dev worker-notifications
@@ -130,70 +211,37 @@ npm run start:dev worker-notifications
 
 ---
 
-## API Reference
+## 📄 API Specifications
 
-### Authentication
+### Authentication API (`auth` tag)
 
-```
-POST /v1/auth/register   →  { accessToken, userId }
-POST /v1/auth/login      →  { accessToken, userId }
-```
+* `POST /v1/auth/register` - Create user account. Returns signed JWT token.
+* `POST /v1/auth/login` - Validate credentials. Returns signed JWT token.
 
-### Payments
-
-All payment endpoints require:
-- `Authorization: Bearer <token>`
-- `x-idempotency-key: <uuid>` (prevents duplicate transfers)
-
-```
-POST /v1/payments/transfer
-Body: { fromWalletId, toWalletId, amount }   ← amount in cents
+```json
+// POST /v1/auth/register
+{
+  "email": "alice@example.com",
+  "password": "SecurePassword123"
+}
 ```
 
-### Search (JWT required)
+### Payments API (`payments` tag)
 
+* `POST /v1/payments/transfer` - Submit a secure double-entry transfer.
+  * *Headers Required*: `Authorization: Bearer <JWT>`, `x-idempotency-key: <UUID>`
+
+```json
+// POST /v1/payments/transfer
+{
+  "fromWalletId": "50c0debb-fc7a-4c28-98cc-4d33a1e2f75a",
+  "toWalletId": "23d5e2ba-aa7c-47b1-84de-c82ba1e9f1a2",
+  "amount": 1000 // In cents (e.g. 1000 = $10.00)
+}
 ```
-GET /v1/search/transactions?query=TRX-123&status=SUCCESS&minAmount=100&from=0&size=10
-GET /v1/search/transactions/:ref
-```
 
-**Interactive Swagger UI**: `http://localhost:3000/api/docs`
+### Search API (`search` tag)
 
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `DATABASE_URL` | — | PostgreSQL connection string |
-| `JWT_SECRET` | `super-secure-fintech-secret-key` | JWT signing secret — **change in production** |
-| `REDIS_HOST` | `localhost` | Redis hostname |
-| `REDIS_PORT` | `6379` | Redis port |
-| `ELASTICSEARCH_NODE` | `http://localhost:9200` | Elasticsearch URL |
-| `PORT` | `3000` | API gateway HTTP port |
-| `NODE_ENV` | — | Set to `production` to disable Swagger |
-
----
-
-## Technology Stack
-
-- **Runtime**: Node.js 22 + TypeScript
-- **Framework**: NestJS 11 (microservices monorepo)
-- **Database**: PostgreSQL 16 + Prisma ORM
-- **Cache / Queue**: Redis 7 + Bull
-- **Search**: Elasticsearch 8 + `@nestjs/elasticsearch`
-- **Auth**: Passport.js + JWT + bcrypt
-- **Logging**: pino + nestjs-pino (structured JSON)
-- **Docs**: Swagger / OpenAPI 3
-- **Containerisation**: Docker + Docker Compose
-
----
-
-## CV Highlights
-
-- Built a **NestJS microservices monorepo** for a fintech payment platform with double-entry ledger accounting and ACID-compliant PostgreSQL transactions with optimistic row-level locking
-- Implemented **async job processing** via Bull/Redis for invoice generation and email notifications, decoupling heavy I/O from the critical payment path (response time ~40ms vs ~2.5s synchronously)
-- Designed a **Redis-backed idempotency layer** (24-hour TTL) to prevent duplicate financial transactions across retries, restarts, and horizontal scaling
-- Integrated **Elasticsearch** for full-text transaction search with fuzzy matching and composite `bool/filter` queries
-- Built a **distributed tracing system** using UUID correlation IDs propagated across TCP microservice boundaries for end-to-end request observability
-- Secured all endpoints with **JWT authentication** and constant-time bcrypt password comparison to prevent timing attacks
+* `GET /v1/search/transactions` - Fuzzy full-text search across transaction ref and wallet ID logs.
+  * *Query Options*: `query`, `status`, `minAmount`, `maxAmount`, `from`, `size`
+* `GET /v1/search/transactions/:ref` - Point-lookup a single transaction by reference.
