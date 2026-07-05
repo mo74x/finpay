@@ -36,6 +36,15 @@
       "compilerOptions": {
         "tsConfigPath": "apps/finpay/tsconfig.app.json"
       }
+    },
+    "worker-notifications": {
+      "type": "application",
+      "root": "apps/worker-notifications",
+      "entryFile": "main",
+      "sourceRoot": "apps/worker-notifications/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/worker-notifications/tsconfig.app.json"
+      }
     }
   }
 }
