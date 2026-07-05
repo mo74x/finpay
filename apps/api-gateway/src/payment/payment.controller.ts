@@ -51,6 +51,7 @@ export class PaymentController {
           toWalletId: transferDto.toWalletId,
           amount: transferDto.amount,
           ref: transactionRef,
+          correlationId: req.headers['x-correlation-id'], // Pass the trace!
         }
       )
     );
