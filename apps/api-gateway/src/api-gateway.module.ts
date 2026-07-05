@@ -3,6 +3,8 @@ import { ClientsModule, Transport } from '@nestjs/microservices';
 import { PaymentController } from './payment/payment.controller';
 import { AuthModule } from './auth/auth.module';
 import { SearchModule } from './search/search.module';
+import { IdempotencyStore } from './idempotency/idempotency.store';
+import { IdempotencyInterceptor } from './idempotency/idempotency.interceptor';
 
 @Module({
   imports: [
@@ -21,5 +23,7 @@ import { SearchModule } from './search/search.module';
     SearchModule,
   ],
   controllers: [PaymentController],
+  // Singletons — shared across all requests
+  providers: [IdempotencyStore, IdempotencyInterceptor],
 })
 export class AppModule {}

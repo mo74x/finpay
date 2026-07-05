@@ -1,20 +1,22 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
-import { 
-  Body, 
-  Controller, 
-  Inject, 
-  Post, 
-  UseInterceptors, 
-  UseGuards, 
-  Req, 
-  ForbiddenException 
+import {
+  Body,
+  Controller,
+  Inject,
+  Post,
+  UseInterceptors,
+  UseGuards,
+  Req,
+  ForbiddenException,
 } from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { firstValueFrom } from 'rxjs';
 import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { TransferDto } from './dto/transfer.dto';
+
 
 @Controller('v1/payments')
 export class PaymentController {
@@ -27,7 +29,7 @@ export class PaymentController {
   @UseInterceptors(IdempotencyInterceptor)
   async executeTransfer(
     @Req() req,
-    @Body() transferDto: { fromWalletId: string; toWalletId: string; amount: number }
+    @Body() transferDto: TransferDto
   ) {
     
     const isOwner = await firstValueFrom(

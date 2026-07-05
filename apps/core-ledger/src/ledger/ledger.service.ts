@@ -1,5 +1,5 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/require-await */
+ 
+ 
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
@@ -134,5 +134,17 @@ export class LedgerService {
 
         // This returns to the user in 40ms!
         return result;
+    }
+
+    /**
+     * Verify that a wallet belongs to the given user.
+     * Used by the API gateway before authorising a debit.
+     */
+    async verifyWalletOwnership(userId: string, walletId: string): Promise<boolean> {
+        const wallet = await this.prisma.wallet.findFirst({
+            where: { id: walletId, userId },
+            select: { id: true },
+        });
+        return wallet !== null;
     }
 }
