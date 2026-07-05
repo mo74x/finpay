@@ -1,30 +1,51 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import { Body, Controller, Inject, Post, UseInterceptors } from '@nestjs/common';
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+import { 
+  Body, 
+  Controller, 
+  Inject, 
+  Post, 
+  UseInterceptors, 
+  UseGuards, 
+  Req, 
+  ForbiddenException 
+} from '@nestjs/common';
 import { ClientProxy } from '@nestjs/microservices';
 import { firstValueFrom } from 'rxjs';
 import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('v1/payments')
 export class PaymentController {
   constructor(
-    // Inject the TCP client we registered in the AppModule
     @Inject('CORE_LEDGER_SERVICE') private readonly ledgerClient: ClientProxy,
   ) {}
 
   @Post('transfer')
-  @UseInterceptors(IdempotencyInterceptor) // Protect this route!
+  @UseGuards(JwtAuthGuard)
+  @UseInterceptors(IdempotencyInterceptor)
   async executeTransfer(
+    @Req() req,
     @Body() transferDto: { fromWalletId: string; toWalletId: string; amount: number }
   ) {
-    // Generate a unique transaction reference for the database
+    
+    const isOwner = await firstValueFrom(
+      this.ledgerClient.send(
+        { cmd: 'verify_wallet_ownership' },
+        { userId: req.user.userId, walletId: transferDto.fromWalletId }
+      )
+    );
+
+    if (!isOwner) {
+      throw new ForbiddenException('You do not have permission to debit this wallet');
+    }
+
     const transactionRef = `TRX-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-    // Send the command over TCP to the core-ledger microservice
-    // firstValueFrom converts the NestJS RxJS Observable into a standard Promise
     const result = await firstValueFrom(
       this.ledgerClient.send(
-        { cmd: 'execute_transfer' }, // The MessagePattern we defined in Phase 2
+        { cmd: 'execute_transfer' },
         {
           fromWalletId: transferDto.fromWalletId,
           toWalletId: transferDto.toWalletId,
