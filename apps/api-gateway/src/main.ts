@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { Logger } from 'nestjs-pino';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './api-gateway.module';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
 import { TraceInterceptor } from './trace/trace.interceptor';
@@ -26,8 +27,31 @@ async function bootstrap() {
   // Return standardised error responses instead of raw NestJS exceptions
   app.useGlobalFilters(new GlobalExceptionFilter());
 
+  // Swagger / OpenAPI — only expose in non-production environments
+  if (process.env.NODE_ENV !== 'production') {
+    const config = new DocumentBuilder()
+      .setTitle('FinPay API')
+      .setDescription(
+        'Production-ready fintech payment API. ' +
+        'Handles double-entry ledger transfers, async invoice generation, and full-text transaction search.',
+      )
+      .setVersion('1.0')
+      .addBearerAuth(
+        { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+        'access-token',
+      )
+      .addTag('auth', 'Register and obtain JWT tokens')
+      .addTag('payments', 'Execute and query financial transfers')
+      .addTag('search', 'Full-text search across transaction history')
+      .build();
+
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/docs', app, document);
+  }
+
   await app.listen(process.env.PORT ?? 3000);
 }
 void bootstrap();
+
 
 
